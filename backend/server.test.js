@@ -1,6 +1,6 @@
 // server.test.js
 const request = require('supertest');
-const app = require('./server'); 
+const app = require('./server');
 
 describe('Server', () => {
   it('should respond with 200 on /health', async () => {
