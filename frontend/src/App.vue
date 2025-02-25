@@ -1,24 +1,28 @@
 <template>
-  <img alt="Vue logo" src="./assets/logo.png">
-  <HelloWorld msg="Welcome to Your Vue.js App"/>
+  <div id="app">
+    <h1>DriveOpenAI</h1>
+    <FileList />
+    <FileFilter />
+    <FileDetail />
+    <AIChat />
+  </div>
 </template>
 
 <script>
-import HelloWorld from './components/HelloWorld.vue'
+import FileList from './components/FileList.vue';
+import FileFilter from './components/FileFilter.vue';
+import FileDetail from './components/FileDetail.vue';
+import AIChat from './components/AIChat.vue';
 
 export default {
   name: 'App',
-  components: {
-    HelloWorld
-  }
-}
+  components: { FileList, FileFilter, FileDetail, AIChat }
+};
 </script>
 
 <style>
 #app {
   font-family: Avenir, Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
   text-align: center;
   color: #2c3e50;
   margin-top: 60px;
