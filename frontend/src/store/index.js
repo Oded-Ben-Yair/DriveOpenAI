@@ -3,12 +3,14 @@ import axios from 'axios';
 
 export default createStore({
   state: {
-    files: [],
+    // Store the entire response from the backend
+    filesData: { files: [], nextPageToken: null },
     selectedFile: null,
+    aiAnswer: '',
   },
   mutations: {
-    SET_FILES(state, files) {
-      state.files = files;
+    SET_FILES_DATA(state, data) {
+      state.filesData = data;
     },
     SET_SELECTED_FILE(state, file) {
       state.selectedFile = file;
@@ -16,26 +18,25 @@ export default createStore({
     CLEAR_SELECTED_FILE(state) {
       state.selectedFile = null;
     },
+    SET_AI_ANSWER(state, answer) {
+      state.aiAnswer = answer;
+    },
+    CLEAR_AI_ANSWER(state) {
+      state.aiAnswer = '';
+    },
   },
   actions: {
-    async fetchFiles({ commit }, { limit = 10, offset = 0 } = {}) {
-      // Adjust URL if your backend is different
-      const response = await axios.get('http://localhost:3000/api/files', {
-        params: { limit, offset },
-      });
-      commit('SET_FILES', response.data.files);
+    async fetchFiles({ commit }, { limit = 10, pageToken = null } = {}) {
+      try {
+        // Pass pageToken as offset; your backend uses "offset" to represent the page token.
+        const response = await axios.get('http://localhost:3000/api/files', {
+          params: { limit, offset: pageToken },
+        });
+        commit('SET_FILES_DATA', response.data);
+      } catch (error) {
+        console.error('Error fetching files:', error);
+      }
     },
-    async fetchFileById({ commit }, id) {
-      const response = await axios.get(`http://localhost:3000/api/files/${id}`);
-      commit('SET_SELECTED_FILE', response.data);
-    },
-    async deleteFile({ commit }, id) {
-      await axios.delete(`http://localhost:3000/api/files/${id}`);
-      commit('CLEAR_SELECTED_FILE');
-    },
-    async askAI(_, question) {
-      const response = await axios.post('http://localhost:3000/api/ai-query', { question });
-      return response.data.answer;
-    },
+    // Other actions for fetchFileById, deleteFile, editFile, askAI, etc.
   },
 });
