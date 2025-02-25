@@ -1,37 +1,60 @@
+// driveService.test.js
 import { jest } from '@jest/globals';
-import { listFiles } from './driveService.js';
 
-// Mock googleapis to prevent real API calls
-jest.mock('googleapis', () => {
-  const mockDrive = {
-    files: {
-      list: jest.fn().mockResolvedValue({
-        data: {
-          files: [
-            { id: 'file1', name: 'test.txt', owners: ['user@example.com'], modifiedTime: '2023-01-01T00:00:00Z', size: '1024' },
-          ],
-          nextPageToken: null,
-        },
-      }),
-    },
-  };
+// First, mock the auth.js module to provide a dummy oauth2Client.
+await jest.unstable_mockModule('./auth.js', () => {
   return {
-    google: {
-      drive: jest.fn(() => mockDrive),
-    },
+    oauth2Client: {
+      // Provide a dummy getRequestMetadataAsync so that no error is thrown.
+      getRequestMetadataAsync: async () => ({ Authorization: 'Bearer dummy-token' })
+    }
   };
 });
 
-// Mock auth.js to bypass authentication
-jest.mock('./auth.js', () => ({
-  oauth2Client: { getAccessToken: jest.fn().mockResolvedValue({ token: 'mock-token' }) },
-}));
+// Next, mock the googleapis module so that drive.files.list returns dummy data.
+await jest.unstable_mockModule('googleapis', () => {
+  return {
+    google: {
+      drive: () => {
+        return {
+          files: {
+            list: async () => ({
+              data: {
+                nextPageToken: 'dummyToken',
+                files: [
+                  {
+                    id: '1',
+                    name: 'File1',
+                    owners: [{ displayName: 'Owner1' }],
+                    modifiedTime: '2023-01-01T00:00:00Z',
+                    size: '1000'
+                  },
+                  {
+                    id: '2',
+                    name: 'File2',
+                    owners: [{ displayName: 'Owner2' }],
+                    modifiedTime: '2023-01-02T00:00:00Z',
+                    size: '2000'
+                  }
+                ]
+              }
+            })
+          }
+        };
+      }
+    }
+  };
+});
+
+// Now import the function to test.
+import { listFiles } from './driveService.js';
 
 describe('Drive Service', () => {
   it('should list files with pagination', async () => {
-    const result = await listFiles({ limit: 10, offset: 0 });
-    expect(result).toBeDefined();
-    expect(Array.isArray(result.files)).toBe(true);
-    expect(result.files.length).toBeLessThanOrEqual(10);
+    const files = await listFiles({ limit: 10, offset: 0 });
+    expect(files).toBeDefined();
+    expect(Array.isArray(files.files)).toBe(true);
+    expect(files.files.length).toBe(2); // Expecting our dummy data (2 files)
+    expect(files.nextPageToken).toBe('dummyToken');
   });
 });
