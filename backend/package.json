@@ -2,12 +2,13 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "",
+  "type": "module",
   "main": "server.js",
   "scripts": {
     "prepare": "husky install",
     "lint": "eslint . --ext .js",
     "format": "prettier --write .",
-    "test": "jest --coverage",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --coverage",
     "start": "node server.js"
   },
   "keywords": [],
@@ -40,4 +41,3 @@
     ]
   }
 }
-

@@ -1,6 +1,6 @@
 // server.test.js
-const request = require('supertest');
-const app = require('./server');
+import request from 'supertest';
+import app from './server.js';
 
 describe('Server', () => {
   it('should respond with 200 on /health', async () => {
