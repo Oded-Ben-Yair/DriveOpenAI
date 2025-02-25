@@ -1,5 +1,5 @@
 // auth.test.js
-const { oauth2Client } = require('./auth');
+import { oauth2Client } from './auth.js';
 
 describe('Google Drive OAuth', () => {
   it('should configure OAuth2 client with correct credentials', () => {
