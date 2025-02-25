@@ -1,4 +1,5 @@
 // server.js
+import cors from 'cors';
 import express from 'express';
 import { listFiles } from './driveService.js';
 import { askQuestion } from './aiService.js';
@@ -8,6 +9,12 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+app.use(cors({
+  origin: 'http://localhost:8080',
+  methods: ['GET', 'POST', 'DELETE'],
+  credentials: true
+}));
 
 // Middleware: Parse JSON bodies
 app.use(express.json());
