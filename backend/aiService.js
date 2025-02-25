@@ -1,35 +1,38 @@
-// aiService.js
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
+import { google } from 'googleapis';
+import { oauth2Client } from './auth.js';
 
 dotenv.config();
 const apiKey = process.env.OPENAI_API_KEY || 'test-api-key';
-
-// Instantiate the OpenAI client once for efficiency
 const openai = new OpenAI({ apiKey });
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-/**
- * Ask a question to the OpenAI API and return the answer.
- * @param {string} question - The question to ask.
- * @returns {Promise<string>} The AI-generated answer.
- */
 export async function askQuestion(question) {
   try {
-    // Use chat.completions.create for modern models
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo', // Replace 'text-davinci-003' with a supported model
-      messages: [
-        { role: 'system', content: 'You are a helpful assistant.' },
-        { role: 'user', content: question },
-      ],
-      max_tokens: 150,
-      temperature: 0.7, // Optional: controls randomness (0.0 - 1.0)
-    });
-
-    // Extract and trim the response text
-    return response.choices[0].message.content.trim();
+    if (question.toLowerCase().includes('files')) {
+      const response = await drive.files.list({
+        pageSize: 100,
+        fields: 'files(id, name, owners, modifiedTime, size)',
+      });
+      const files = response.data.files;
+      const prompt = `${question}\n\nFiles: ${JSON.stringify(files, null, 2)}`;
+      const aiResponse = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 150,
+      });
+      return aiResponse.choices[0].message.content.trim();
+    } else {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [{ role: 'user', content: question }],
+        max_tokens: 150,
+      });
+      return response.choices[0].message.content.trim();
+    }
   } catch (error) {
     console.error('Error in askQuestion:', error.message);
-    throw error; // Re-throw to handle in the calling context (e.g., server.js)
+    throw error;
   }
 }
