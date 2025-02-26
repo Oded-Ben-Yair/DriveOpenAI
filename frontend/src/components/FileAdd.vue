@@ -1,9 +1,12 @@
+<!-- src/components/FileAdd.vue -->
 <template>
     <div class="file-add">
-      <h2>Create a New File</h2>
+      <h2>Create / Upload File</h2>
       <input v-model="name" placeholder="File Name" />
-      <textarea v-model="content" placeholder="File Content"></textarea>
+      <textarea v-model="content" placeholder="File Content (for text files)"></textarea>
       <button @click="createNewFile">Create File</button>
+      <br />
+      <input type="file" @change="uploadFile" />
     </div>
   </template>
   
@@ -25,24 +28,34 @@
         this.name = '';
         this.content = '';
       },
+      async uploadFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        // For simplicity, we'll read the file as text.
+        // For binary files, consider using FormData and adjusting your backend.
+        const reader = new FileReader();
+        reader.onload = () => {
+          this.$store.dispatch('createFile', {
+            name: file.name,
+            content: reader.result,
+          });
+        };
+        reader.readAsText(file);
+      },
     },
   };
   </script>
   
   <style scoped>
   .file-add {
-    margin-bottom: 20px;
     padding: 10px;
     border: 1px solid #ccc;
+    margin-bottom: 20px;
   }
-  .file-add input {
-    display: block;
-    margin-bottom: 10px;
-  }
+  .file-add input,
   .file-add textarea {
     display: block;
     width: 100%;
-    height: 80px;
     margin-bottom: 10px;
   }
   </style>

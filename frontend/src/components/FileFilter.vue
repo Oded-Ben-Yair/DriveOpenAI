@@ -1,12 +1,11 @@
+<!-- src/components/FileFilter.vue -->
 <template>
-    <div>
-      <h2>Filter by Modified Date</h2>
-      <input type="date" v-model="date" @change="filterFiles" :disabled="loading" />
-      <p v-if="loading">Loading...</p>
-      <p v-if="error" class="error">{{ error }}</p>
+    <div class="file-filter">
+      <h2>Filter Files by Date</h2>
+      <input type="date" v-model="date" @change="filterFiles" />
       <ul>
         <li v-for="file in filteredFiles" :key="file.id">
-          {{ file.name }} - {{ file.modifiedTime }}
+          <strong>{{ file.name }}</strong> ({{ formatDate(file.modifiedTime) }})
         </li>
       </ul>
     </div>
@@ -17,31 +16,36 @@
     data() {
       return {
         date: '',
-        filteredFiles: []
+        filteredFiles: [],
       };
     },
     computed: {
       files() {
-        return this.$store.state.files;
+        return this.$store.state.filesData?.files || [];
       },
-      loading() {
-        return this.$store.state.loading;
-      },
-      error() {
-        return this.$store.state.error;
-      }
     },
     methods: {
       filterFiles() {
-        if (!this.date) return;
-        this.filteredFiles = this.files.filter(file => new Date(file.modifiedTime) >= new Date(this.date));
-      }
-    }
+        if (!this.date) {
+          this.filteredFiles = [];
+          return;
+        }
+        this.filteredFiles = this.files.filter(file => {
+          return new Date(file.modifiedTime) >= new Date(this.date);
+        });
+      },
+      formatDate(dateStr) {
+        return new Date(dateStr).toLocaleString();
+      },
+    },
   };
   </script>
   
   <style scoped>
-  .error {
-    color: red;
+  .file-filter {
+    margin-bottom: 20px;
+    padding: 10px;
+    border: 1px solid #ccc;
   }
   </style>
+  

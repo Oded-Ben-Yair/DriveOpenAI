@@ -1,17 +1,18 @@
+<!-- src/components/FileDetail.vue -->
 <template>
-    <div>
+    <div class="file-detail">
       <h2>File Details</h2>
-      <input v-model="fileId" placeholder="Enter File ID" :disabled="loading" />
-      <button @click="fetchFile" :disabled="loading">Fetch</button>
-      <button @click="deleteFile" :disabled="!selectedFile || loading">Delete</button>
-      <p v-if="loading">Loading...</p>
-      <p v-if="error" class="error">{{ error }}</p>
-      <div v-if="selectedFile">
-        <p>ID: {{ selectedFile.id }}</p>
-        <p>Name: {{ selectedFile.name }}</p>
-        <p>Owners: {{ selectedFile.owners.join(', ') }}</p>
-        <p>Modified: {{ selectedFile.modifiedTime }}</p>
-        <p>Size: {{ selectedFile.size }} bytes</p>
+      <input v-model="fileId" placeholder="Enter File ID" />
+      <button @click="fetchFile">Fetch</button>
+      <button @click="deleteFile" :disabled="!selectedFile">Delete</button>
+      <div v-if="selectedFile" class="file-info">
+        <p><strong>ID:</strong> {{ selectedFile.id }}</p>
+        <p><strong>Name:</strong> {{ selectedFile.name }}</p>
+        <input v-model="newName" placeholder="New file name" />
+        <button @click="editFile" :disabled="!newName">Rename</button>
+        <p><strong>Owners:</strong> {{ getOwners() }}</p>
+        <p><strong>Modified:</strong> {{ formatDate(selectedFile.modifiedTime) }}</p>
+        <p><strong>Size:</strong> {{ selectedFile.size }} bytes</p>
       </div>
     </div>
   </template>
@@ -20,19 +21,14 @@
   export default {
     data() {
       return {
-        fileId: ''
+        fileId: '',
+        newName: '',
       };
     },
     computed: {
       selectedFile() {
         return this.$store.state.selectedFile;
       },
-      loading() {
-        return this.$store.state.loading;
-      },
-      error() {
-        return this.$store.state.error;
-      }
     },
     methods: {
       fetchFile() {
@@ -40,17 +36,38 @@
         this.$store.dispatch('fetchFileById', this.fileId);
       },
       deleteFile() {
-        if (!this.selectedFile) return;
-        this.$store.dispatch('deleteFile', this.selectedFile.id).then(() => {
+        this.$store.dispatch('deleteFile', this.fileId).then(() => {
           this.fileId = '';
+          this.newName = '';
         });
-      }
-    }
+      },
+      editFile() {
+        const updatedData = { name: this.newName };
+        this.$store.dispatch('editFile', { id: this.fileId, updatedData }).then(() => {
+          this.newName = '';
+        });
+      },
+      getOwners() {
+        if (!this.selectedFile.owners) return '';
+        return this.selectedFile.owners.map(o => o.displayName).join(', ');
+      },
+      formatDate(dateStr) {
+        return new Date(dateStr).toLocaleString();
+      },
+    },
   };
   </script>
   
   <style scoped>
-  .error {
-    color: red;
+  .file-detail {
+    margin-bottom: 20px;
+    padding: 10px;
+    border: 1px solid #ccc;
+  }
+  .file-info {
+    margin-top: 10px;
+    background: #f9f9f9;
+    padding: 10px;
   }
   </style>
+  

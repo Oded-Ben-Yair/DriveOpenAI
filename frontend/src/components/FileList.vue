@@ -1,12 +1,16 @@
+<!-- src/components/FileList.vue -->
 <template>
-    <div>
+    <div class="file-list">
       <h2>Google Drive Files</h2>
-      <button @click="fetchFiles" :disabled="loading">Refresh</button>
-      <p v-if="loading">Loading...</p>
-      <p v-if="error" class="error">{{ error }}</p>
+      <div class="controls">
+        <button @click="fetchFiles()">Refresh</button>
+        <button v-if="nextPageToken" @click="fetchNextPage">Next Page</button>
+      </div>
       <ul>
         <li v-for="file in files" :key="file.id">
-          {{ file.name }} - {{ file.owners[0] }} - {{ file.modifiedTime }}
+          <strong>{{ file.name }}</strong>
+          <em>- {{ file.owners?.[0]?.displayName || 'Unknown Owner' }}</em>
+          ({{ formatDate(file.modifiedTime) }})
         </li>
       </ul>
     </div>
@@ -15,29 +19,43 @@
   <script>
   export default {
     computed: {
+      filesData() {
+        return this.$store.state.filesData || { files: [], nextPageToken: null };
+      },
       files() {
-        return this.$store.state.files;
+        return this.filesData.files;
       },
-      loading() {
-        return this.$store.state.loading;
+      nextPageToken() {
+        return this.filesData.nextPageToken;
       },
-      error() {
-        return this.$store.state.error;
-      }
     },
     methods: {
-      fetchFiles() {
-        this.$store.dispatch('fetchFiles', { limit: 10, offset: 0 });
-      }
+      fetchFiles(pageToken = null) {
+        this.$store.dispatch('fetchFiles', { limit: 10, pageToken });
+      },
+      fetchNextPage() {
+        if (this.nextPageToken) {
+          this.fetchFiles(this.nextPageToken);
+        }
+      },
+      formatDate(dateStr) {
+        return new Date(dateStr).toLocaleString();
+      },
     },
     mounted() {
       this.fetchFiles();
-    }
+    },
   };
   </script>
   
   <style scoped>
-  .error {
-    color: red;
+  .file-list {
+    margin-bottom: 20px;
+    padding: 10px;
+    border: 1px solid #ccc;
+  }
+  .controls {
+    margin-bottom: 10px;
   }
   </style>
+  
