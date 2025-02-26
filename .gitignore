@@ -18,3 +18,5 @@ coverage/
 # Editor settings
 .idea/
 .vscode/
+.npmrc
+frontend.zip
