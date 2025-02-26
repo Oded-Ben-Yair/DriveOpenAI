@@ -1,0 +1,19 @@
+{
+  "name": "driveopenai-root",
+  "version": "1.0.0",
+  "private": true,
+"scripts": {
+  "prepare": "husky install",
+  "test": "cd backend && npm test"
+},
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
+}
