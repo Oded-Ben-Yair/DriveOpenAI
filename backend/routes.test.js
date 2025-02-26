@@ -34,7 +34,18 @@ jest.mock('./aiService.js', () => ({
 
 // Mock auth.js
 jest.mock('./auth.js', () => ({
-  oauth2Client: { getAccessToken: jest.fn().mockResolvedValue({ token: 'mock-token' }) },
+  oauth2Client: { 
+    credentials: { access_token: 'mock-token' },
+    getAuthUrl: jest.fn().mockReturnValue('https://example.com/auth'),
+    getToken: jest.fn().mockResolvedValue({ tokens: { access_token: 'mock-token' } })
+  },
+  getAuthUrl: jest.fn().mockReturnValue('https://example.com/auth'),
+  getToken: jest.fn().mockResolvedValue({ access_token: 'mock-token' })
+}));
+
+// Mock gmailService.js
+jest.mock('./gmailService.js', () => ({
+  listEmails: jest.fn().mockResolvedValue({ emails: [], nextPageToken: null }),
 }));
 
 describe('API Endpoints', () => {

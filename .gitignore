@@ -19,4 +19,4 @@ coverage/
 .idea/
 .vscode/
 .npmrc
-frontend.zip
+frontend.zipbackend/token.json
