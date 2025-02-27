@@ -1,20 +1,90 @@
-# Node
+# Node.js dependencies
 node_modules/
 npm-debug.log
+yarn-debug.log
 yarn-error.log
 
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Build directories
+/dist
+/build
+
+# Coverage directory
+/coverage
+
+# Token storage
+token.json
+credentials.json
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
 # Logs
-logs/
+logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Env & Coverage
-.env
-.env.local
-coverage/
+# Vue CLI
+.DS_Store
+node_modules
+/dist
 
-# Editor settings
-.idea/
-.vscode/
+# local env files
+.env.local
+.env.*.local
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor directories and files
+.idea
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+EOL
+
+# Create backend .env file
+cd backend
+cat > .env << 'EOL'
+PORT=3000
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:3000/auth/google/callback
+OPENAI_API_KEY=your_openai_api_key
+EOL
+
+# Now install dependencies
+npm install
+
+# Go to frontend and create .env
+cd ../frontend
+cat > .env << 'EOL'
+VUE_APP_API_BASE_URL=http://localhost:3000
+EOL
+
+# Install frontend dependencies
+npm installcoverage/
+frontend.zip
+.npmrc
+.eslintrc.js
