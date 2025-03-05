@@ -1,0 +1,361 @@
+// backend/aiService.js
+// This file contains AI helper functions for DriveOpenAI.
+// It implements functions for obtaining embeddings with caching and normalization,
+// performing semantic search over an in‑memory vector index, building the index from Drive files,
+// and generating AI answers (using Retrieval‑Augmented Generation).
+// Advanced improvements such as multi-agent orchestration (e.g., via LangChain) can be added later.
+
+import dotenv from 'dotenv';
+import OpenAI from 'openai';
+import { listAndIndexFiles, getFileContent } from './driveService.js';
+import logger from './logger.js';
+import { chunkText, cosineSimilarity, retryWithBackoff } from './utils.js';
+
+dotenv.config();
+
+// Initialize OpenAI client using the API key from environment variables.
+const apiKey = process.env.OPENAI_API_KEY;
+const openai = new OpenAI({ apiKey });
+
+// Embedding model name is configurable via environment variables.
+const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-ada-002';
+
+// Maximum number of document chunks to include in the context for answering a query.
+const MAX_CONTEXT_CHUNKS = 4;
+
+// In-memory vector index to store document chunks along with their embeddings.
+let vectorIndex = [];
+
+// Flags to control indexing process.
+let isIndexing = false;
+let lastIndexTime = 0;
+const INDEX_TTL_MS = 60 * 60 * 1000; // 1 hour TTL for the vector index
+
+// In-memory cache for text embeddings (keyed by normalized text).
+const EMBEDDING_CACHE = new Map();
+
+/**
+ * Get embedding for text using OpenAI's API.
+ * Includes normalization, caching, token truncation, and retry logic.
+ *
+ * @param {string} text - Text to embed.
+ * @returns {Promise<Array<number>>} - The embedding vector.
+ */
+export async function getEmbedding(text) {
+  if (!text || typeof text !== 'string' || text.trim().length === 0) {
+    logger.warn('Attempted to get embedding for empty or invalid text');
+    // Return a zero vector (1536 dimensions for ada) to avoid breaking downstream logic.
+    return new Array(1536).fill(0);
+  }
+  
+  // Normalize text: trim, reduce whitespace, and convert to lowercase for consistency.
+  let normalizedText = text.trim().replace(/\s+/g, ' ').toLowerCase();
+  
+  // To avoid exceeding model token limits, truncate overly long texts.
+  // Rough estimation: 1 token ~ 4 characters for English text.
+  if (normalizedText.length > 8000) {
+    logger.debug(`Truncating long text (${normalizedText.length} chars) for embedding`);
+    normalizedText = normalizedText.substring(0, 8000);
+  }
+  
+  // Check our in-memory cache first.
+  if (EMBEDDING_CACHE.has(normalizedText)) {
+    return EMBEDDING_CACHE.get(normalizedText);
+  }
+  
+  try {
+    // Use retryWithBackoff to mitigate transient API errors.
+    const response = await retryWithBackoff(() => openai.embeddings.create({
+      model: EMBEDDING_MODEL,
+      input: normalizedText
+    }));
+    
+    const embedding = response.data[0].embedding;
+    
+    // Cache the computed embedding.
+    EMBEDDING_CACHE.set(normalizedText, embedding);
+    return embedding;
+  } catch (error) {
+    logger.error(`Error generating embedding: ${error.message}`);
+    // Return a fallback zero vector if embedding fails.
+    return new Array(1536).fill(0);
+  }
+}
+
+/**
+ * Perform semantic search over the vector index.
+ * Computes cosine similarity between query embedding and each stored chunk,
+ * then returns the top matching chunks above a similarity threshold.
+ *
+ * @param {string} query - The user query.
+ * @param {number} [topK=3] - Maximum number of top results to return.
+ * @returns {Promise<Array>} - Array of matching chunks with similarity scores.
+ */
+export async function semanticSearch(query, topK = 3) {
+  try {
+    // Ensure the vector index is not empty.
+    if (vectorIndex.length === 0) {
+      logger.warn('No documents in vector index. Returning empty results.');
+      return [];
+    }
+    
+    // Obtain the embedding for the query.
+    const queryEmbedding = await getEmbedding(query);
+    
+    // Compute cosine similarity for each chunk.
+    const scoredChunks = vectorIndex.map(item => {
+      const score = cosineSimilarity(queryEmbedding, item.embedding);
+      return { ...item, score };
+    });
+    
+    // Sort chunks in descending order by similarity.
+    scoredChunks.sort((a, b) => b.score - a.score);
+    
+    // Filter out low-similarity chunks (threshold 0.3) and return up to topK.
+    const filteredChunks = scoredChunks
+      .filter(chunk => chunk.score > 0.3)
+      .slice(0, topK);
+      
+    return filteredChunks;
+  } catch (error) {
+    logger.error(`Error in semantic search: ${error.message}`);
+    return [];
+  }
+}
+
+/**
+ * Helper function to determine if content is unusable.
+ * Returns true if the content appears to be an error message or placeholder.
+ *
+ * @param {string} content - The text content to check.
+ * @returns {boolean} - True if content is considered error/placeholder.
+ */
+function isErrorContent(content) {
+  if (!content || typeof content !== 'string') return true;
+  return content.startsWith('[Error') ||
+         content.startsWith('[Unsupported') ||
+         content.startsWith('[Content unavailable') ||
+         content.startsWith('[Image file') ||
+         content.startsWith('[Media file') ||
+         content.startsWith('[File not downloadable') ||
+         content.startsWith('[Google Drive Folder]');
+}
+
+/**
+ * Build the vector index from Google Drive documents.
+ * Fetches files, extracts text content, splits into chunks, computes embeddings,
+ * and stores them in an in-memory vector index.
+ *
+ * @param {boolean} [force=false] - Whether to force a rebuild of the index.
+ * @returns {Promise<number>} - Number of indexed chunks.
+ */
+export async function buildVectorIndex(force = false) {
+  // Avoid concurrent indexing processes.
+  if (isIndexing) {
+    logger.info('Indexing already in progress');
+    return -1;
+  }
+  
+  // If not forced and the existing index is fresh, use it.
+  if (!force && vectorIndex.length > 0 && (Date.now() - lastIndexTime) < INDEX_TTL_MS) {
+    logger.info(`Using existing index with ${vectorIndex.length} chunks`);
+    return vectorIndex.length;
+  }
+  
+  try {
+    isIndexing = true;
+    logger.info('Starting vector index build');
+    
+    // Clear the previous index and embedding cache.
+    vectorIndex = [];
+    EMBEDDING_CACHE.clear();
+    
+    // Fetch all indexable files (listAndIndexFiles is assumed to filter files appropriately)
+    const files = await listAndIndexFiles({ maxFiles: 100 });
+    
+    let processedFiles = 0;
+    let indexedChunks = 0;
+    
+    // Process each file sequentially.
+    for (const file of files) {
+      try {
+        // Retrieve file content using its ID and mime type.
+        const content = await getFileContent(file.id, file.mimeType);
+        
+        // Skip if content is empty, too short, or flagged as error.
+        if (!content || content.length < 20 || isErrorContent(content)) {
+          logger.debug(`Skipping file ${file.id} (${file.name}) - invalid content`);
+          continue;
+        }
+        
+        // Split the text into manageable chunks.
+        const chunks = chunkText(content);
+        logger.debug(`Processing ${chunks.length} chunks for file ${file.name} (${file.id})`);
+        
+        // Process each chunk and compute its embedding.
+        for (const [i, chunk] of chunks.entries()) {
+          if (chunk.length < 20 || isErrorContent(chunk)) continue;
+          
+          try {
+            const embedding = await getEmbedding(chunk);
+            // Check if embedding is valid (non-zero vector)
+            if (embedding.every(val => val === 0)) continue;
+            
+            // Store the chunk in the vector index.
+            vectorIndex.push({
+              fileId: file.id,
+              fileName: file.name,
+              chunkIndex: i,
+              chunk,
+              embedding
+            });
+            indexedChunks++;
+          } catch (embeddingError) {
+            logger.error(`Error generating embedding for chunk in file ${file.id} (${file.name}): ${embeddingError.message}`);
+            // Continue processing remaining chunks
+          }
+        }
+        processedFiles++;
+      } catch (error) {
+        logger.error(`Error processing file ${file.id} (${file.name}): ${error.message}`);
+        // Continue with other files even if one fails.
+      }
+    }
+    
+    lastIndexTime = Date.now();
+    logger.info(`Vector index built: ${indexedChunks} chunks indexed from ${processedFiles} files (out of ${files.length} attempted)`);
+    return indexedChunks;
+  } catch (error) {
+    logger.error(`Error building vector index: ${error.message}`);
+    return 0;
+  } finally {
+    isIndexing = false;
+  }
+}
+
+/**
+ * Answer a user query using Retrieval-Augmented Generation (RAG).
+ * Searches the vector index for relevant document chunks, constructs a prompt,
+ * and uses the OpenAI chat completion API to generate an answer.
+ *
+ * @param {string} question - The user's query.
+ * @returns {Promise<string>} - The AI-generated answer appended with source citations.
+ */
+export async function answerQuery(question) {
+  try {
+    logger.info(`Answering query: "${question}"`);
+    
+    // Ensure the vector index is built
+    if (vectorIndex.length === 0) {
+      logger.info('Vector index is empty; rebuilding index...');
+      const indexSize = await buildVectorIndex();
+      if (indexSize <= 0) {
+        return "I couldn't find any indexable documents in your Google Drive. They may be in unsupported formats or inaccessible.";
+      }
+    }
+    
+    // Retrieve top relevant chunks using semantic search
+    const relevantChunks = await semanticSearch(question, MAX_CONTEXT_CHUNKS);
+    
+    if (relevantChunks.length === 0) {
+      return "I couldn't find any relevant information in your Drive files to answer that question. Please try a different query.";
+    }
+    
+    // Construct a context string from the retrieved chunks,
+    // including the file names to serve as source citations.
+    let contextText = "";
+    const sources = new Set();
+    for (const item of relevantChunks) {
+      if (!isErrorContent(item.chunk)) {
+        contextText += `From "${item.fileName}":\n${item.chunk}\n\n---\n\n`;
+        sources.add(item.fileName);
+      }
+    }
+    
+    if (contextText.trim().length === 0) {
+      return "I found some relevant files, but could not extract usable content from them.";
+    }
+    
+    // Build the prompt with a system instruction to focus on factual accuracy and citation.
+    const prompt = `You are an AI assistant specialized in answering questions about the user's Google Drive documents.
+Use only the following excerpts from the documents to answer the query.
+If the answer is not found in the provided excerpts, state that clearly.
+Always cite the document names when using their content.
+
+Document Excerpts:
+${contextText}
+
+User Query: "${question}"
+
+Answer:`;
+    
+    // Call the OpenAI Chat Completion API with a low temperature for factual responses.
+    const completion = await retryWithBackoff(() => openai.chat.completions.create({
+      model: "gpt-3.5-turbo", // You can update to gpt-4 or another model as needed.
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3,
+      max_tokens: 500
+    }));
+    
+    const answer = completion.choices[0].message.content.trim();
+    
+    // Append a formatted sources note if sources exist.
+    let sourcesNote = "";
+    if (sources.size > 0) {
+      sourcesNote = "\n\nSources:\n" + Array.from(sources).map(src => `- ${src}`).join("\n");
+    }
+    
+    return answer + sourcesNote;
+  } catch (error) {
+    logger.error(`Error in answerQuery: ${error.message}`);
+    return "I encountered an error while processing your question. Please try again or rephrase your query.";
+  }
+}
+
+/**
+ * Handle special predefined queries (e.g., metadata-based questions).
+ * Currently a placeholder that can be extended to handle common queries faster.
+ *
+ * @param {string} question - The user's query.
+ * @returns {Promise<string|null>} - Returns an answer string if handled, otherwise null.
+ */
+export async function handleSpecialQueries(question) {
+  if (!question) return null;
+  const lowerQuestion = question.toLowerCase();
+  
+  // Example: if the question asks about file ownership or similar metadata,
+  // you can handle it without performing full RAG.
+  if (lowerQuestion.includes('who owns the most files') ||
+      lowerQuestion.includes('most recently modified') ||
+      lowerQuestion.includes('largest file')) {
+    // Not implemented here – let the normal RAG process handle these.
+    return null;
+  }
+  
+  return null; // Not a special query.
+}
+
+/**
+ * Main entry point for answering a question.
+ * Validates input and either handles special queries or uses RAG for an answer.
+ *
+ * @param {string} question - The user's query.
+ * @returns {Promise<string>} - The final answer.
+ */
+export async function askQuestion(question) {
+  try {
+    if (!question || typeof question !== 'string' || question.trim().length === 0) {
+      return "I need a question to answer. Please ask something about your documents.";
+    }
+    
+    // Check for any special queries (e.g., metadata queries)
+    const specialAnswer = await handleSpecialQueries(question);
+    if (specialAnswer) return specialAnswer;
+    
+    // Use full RAG to answer the question.
+    return await answerQuery(question);
+  } catch (error) {
+    logger.error(`Error in askQuestion: ${error.message}`, error);
+    return "I encountered an error while processing your question. Please try again.";
+  }
+}

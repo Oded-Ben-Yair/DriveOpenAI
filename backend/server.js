@@ -1,263 +1,307 @@
-// server.js - Full updated version
+// backend/server.js
+// This is the main entry point for DriveOpenAI's backend.
+// It sets up Express with security, logging, rate limiting, authentication,
+// and routes for Google Drive, Gmail, and AI endpoints.
+// It also loads any stored credentials and starts the server.
+
 import express from 'express';
-import { oauth2Client, getAuthUrl, getToken } from './auth.js';
-import { listFiles, getFileById, deleteFile, updateFile } from './driveService.js';
-import { listEmails } from './gmailService.js';
-import { askQuestion } from './aiService.js';
-import dotenv from 'dotenv';
-import cors from 'cors';
-import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';                   // Security middleware: sets HTTP headers
+import morgan from 'morgan';                   // HTTP request logging
+import cors from 'cors';                       // Cross-origin resource sharing
+import rateLimit from 'express-rate-limit';    // Rate limiting middleware
 import { check, validationResult } from 'express-validator';
+import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import logger from './logger.js';              // Custom logger using Winston
 
+// Import authentication and route modules
+import { oauth2Client, getAuthUrl, handleOAuthCallback, authenticate, refreshAccessToken } from './auth.js';
+import driveRoutes from './driveService.js';
+import gmailRoutes from './gmailService.js';
+import aiRoutes, { 
+  buildVectorIndex, 
+  getIndexingProgress,
+  askAIQuestion, 
+  askAIQuestionWithFocus 
+} from './aiService.js';
+
+// Load environment variables from .env file
 dotenv.config();
 
+// Create Express app and set port
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Determine __dirname in ES modules
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TOKEN_PATH = path.join(__dirname, 'token.json');
 
-// Rate limiting middleware
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per window
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// Define path for token storage (ensure data directory exists)
+const TOKEN_PATH = path.join(__dirname, 'data', 'token.json');
+if (!fs.existsSync(path.join(__dirname, 'data'))) {
+  fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+}
 
-// Enable CORS for frontend
+// ---------------------------
+// Middleware Setup
+// ---------------------------
+
+// Use Helmet to secure HTTP headers
+app.use(helmet());
+
+// Parse JSON bodies with a size limit
+app.use(express.json({ limit: '1mb' }));
+
+// Use Morgan to log HTTP requests in combined format
+app.use(morgan('combined'));
+
+// Configure CORS – allow requests only from approved origins (e.g., your frontend)
 app.use(cors({
-  origin: 'http://localhost:8080',
+  origin: process.env.CORS_ORIGIN || 'http://localhost:8080',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
 
-app.use(express.json());
-
-// Apply rate limiting to all API requests
+// Apply rate limiting to all routes under /api to prevent abuse
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes window
+  max: 100,                // limit each IP to 100 requests per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many requests from this IP, please try again later'
+});
 app.use('/api/', apiLimiter);
 
-// Middleware to set token from headers
+// Performance monitoring middleware to log request duration
 app.use((req, res, next) => {
-  const token = req.headers['x-google-token'];
-  
-  if (token) {
-    try {
-      // Parse and set the token
-      const tokenObj = JSON.parse(token);
-      oauth2Client.setCredentials(tokenObj);
-    } catch (error) {
-      console.error('Error parsing token from headers:', error);
-      // Continue anyway
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.debug(`${req.method} ${req.originalUrl} completed in ${duration}ms with status ${res.statusCode}`);
+    const MAX_RESPONSE_TIME = Number(process.env.MAX_RESPONSE_TIME_MS) || 1000;
+    if (duration > MAX_RESPONSE_TIME) {
+      logger.warn(`Slow request: ${req.method} ${req.originalUrl} took ${duration}ms`);
     }
-  }
-  
+  });
   next();
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => res.status(200).send('OK'));
+// Token Refresh Middleware - should come before route handlers
+app.use(async (req, res, next) => {
+  try {
+    if (oauth2Client.credentials?.expiry_date) {
+      const now = Date.now();
+      // If the token expires in less than 5 minutes, refresh it
+      if (oauth2Client.credentials.expiry_date - now < 5 * 60 * 1000) {
+        logger.info('Access token is expiring soon; attempting to refresh.');
+        await refreshAccessToken();
+      }
+    }
+  } catch (error) {
+    logger.error('Error refreshing access token:', error);
+  }
+  next();
+});
 
-// Authentication endpoints
+// ---------------------------
+// Authentication Middleware
+// ---------------------------
+// Use the standard "Authorization: Bearer <token>" header.
+// The "authenticate" middleware verifies the JWT and attaches user credentials.
+app.use(authenticate);
+
+// ---------------------------
+// Route Definitions
+// ---------------------------
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Authentication routes
 app.get('/auth/google', (req, res) => {
+  // Redirect the user to Google's OAuth 2.0 consent page
   const authUrl = getAuthUrl();
   res.redirect(authUrl);
 });
 
-app.get('/auth/google/callback', async (req, res) => {
-  const { code } = req.query;
-  
+app.get('/auth/google/callback', async (req, res, next) => {
+  // Handle Google OAuth callback: exchange code for tokens and issue a JWT
   try {
-    const tokens = await getToken(code);
-    
-    // Store tokens in a file for future use
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
-    console.log('Token stored to', TOKEN_PATH);
-    
-    // In a real app, you would store tokens in the user's session
-    res.redirect(`http://localhost:8080?auth=success&token=${encodeURIComponent(JSON.stringify(tokens))}`);
+    await handleOAuthCallback(req, res, next);
+    // The callback handler sends the JWT or sets a secure cookie.
   } catch (error) {
-    console.error('Error during authentication:', error);
-    res.redirect(`http://localhost:8080?auth=error&message=${encodeURIComponent(error.message)}`);
+    logger.error('Error during Google OAuth callback:', error);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:8080'}?auth=error&message=${encodeURIComponent(error.message)}`);
   }
 });
 
-// Route to refresh or set token
+// Token update endpoint: allows client to set new token and save it to disk (for persistence)
 app.post('/auth/token', express.json(), async (req, res) => {
   const { token } = req.body;
-  
   if (!token) {
     return res.status(400).json({ error: 'Token is required' });
   }
-  
   try {
-    // Set the token in oauth2Client
     oauth2Client.setCredentials(token);
-    
-    // Also save to file
     fs.writeFileSync(TOKEN_PATH, JSON.stringify(token));
-    
     res.status(200).json({ success: true });
   } catch (error) {
-    console.error('Error setting token:', error);
+    logger.error('Error setting token:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Simple route to check auth status
+// Auth status endpoint: returns whether the server has valid credentials
 app.get('/auth/status', (req, res) => {
   try {
-    // If credentials exist and are valid
     if (oauth2Client.credentials && oauth2Client.credentials.access_token) {
-      res.json({ 
+      res.json({
         authenticated: true,
-        // Don't send the actual tokens to the frontend for security
-        // Just confirm they exist
         hasAccessToken: true,
-        hasRefreshToken: !!oauth2Client.credentials.refresh_token
+        hasRefreshToken: !!oauth2Client.credentials.refresh_token,
+        tokenExpiresAt: oauth2Client.credentials.expiry_date
       });
     } else {
       res.json({ authenticated: false });
     }
   } catch (error) {
+    logger.error('Error checking auth status:', error);
     res.json({ authenticated: false, error: error.message });
   }
 });
 
-// Drive API endpoints
-app.get('/api/files', [
-  check('limit').optional().isInt({ min: 1, max: 100 }),
-  check('offset').optional().isString(),
-  check('modifiedAfter').optional().isISO8601(),
-  check('modifiedBefore').optional().isISO8601(),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-  
+// ---------------------------
+// Google API Routes
+// ---------------------------
+
+// Drive endpoints
+app.use('/api/files', driveRoutes); // Endpoints for file operations
+
+// Gmail endpoints
+app.use('/api/emails', gmailRoutes); // Endpoints for email operations
+
+// AI endpoints
+app.use('/api/ai-query', aiRoutes);  // Endpoints for AI (RAG functionality)
+
+// ---------------------------
+// NEW RAG and Conversation Endpoints
+// ---------------------------
+
+// Index building endpoint
+app.post('/api/index-build', async (req, res) => {
   try {
-    const { limit, offset, modifiedAfter, modifiedBefore } = req.query;
-    const data = await listFiles({ 
-      limit: Number(limit) || 10, 
-      offset,
-      modifiedAfter,
-      modifiedBefore
+    const { force } = req.body;
+    // Start indexing asynchronously
+    buildVectorIndex(force).catch(err => {
+      logger.error('Background indexing error:', err);
     });
-    res.status(200).json(data);
+    // Return current indexing status immediately
+    res.status(200).json(getIndexingProgress());
   } catch (error) {
-    console.error('Error listing files:', error);
+    logger.error('Error starting indexing:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/files/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const file = await getFileById(id);
-    res.status(200).json(file);
-  } catch (error) {
-    console.error('Error getting file:', error);
-    res.status(500).json({ error: error.message });
-  }
+// Index status endpoint
+app.get('/api/indexing-status', (req, res) => {
+  const status = getIndexingProgress();
+  res.status(200).json(status);
 });
 
-app.delete('/api/files/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await deleteFile(id);
-    res.status(204).send();
-  } catch (error) {
-    console.error('Error deleting file:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/files/:id', [
-  check('name').optional().isString(),
-  check('description').optional().isString(),
+// AI conversation query endpoint
+app.post('/api/ai-conversation', [
+  check('question').notEmpty().withMessage('Question is required')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ errors: errors.array() });
   }
-  
   try {
-    const { id } = req.params;
-    const { name, description } = req.body;
-    const metadata = {};
-    
-    if (name) metadata.name = name;
-    if (description) metadata.description = description;
-    
-    const updatedFile = await updateFile(id, metadata);
-    res.status(200).json(updatedFile);
+    const { question, conversationId } = req.body;
+    const userId = req.headers['x-user-id'] || 'default'; // Retrieve user ID from auth in production
+    const response = await askAIQuestion(question, conversationId, userId);
+    res.status(200).json(response);
   } catch (error) {
-    console.error('Error updating file:', error);
+    logger.error('Error with AI conversation:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Gmail API endpoint
-app.get('/api/emails', [
-  check('maxResults').optional().isInt({ min: 1, max: 100 }),
-  check('query').optional().isString(),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() });
-  }
-  
-  try {
-    const { maxResults, query } = req.query;
-    const data = await listEmails({ 
-      maxResults: Number(maxResults) || 10,
-      query: query || ''
-    });
-    res.status(200).json(data);
-  } catch (error) {
-    console.error('Error listing emails:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// AI query endpoint
-app.post('/api/ai-query', [
+// AI query endpoint with focused documents
+app.post('/api/ai-query/focused', [
   check('question').notEmpty().withMessage('Question is required'),
+  check('documentIds').isArray().withMessage('Document IDs must be an array')
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ errors: errors.array() });
   }
-  
   try {
-    const { question } = req.body;
-    const answer = await askQuestion(question);
-    res.status(200).json({ answer });
+    const { question, documentIds, conversationId } = req.body;
+    const userId = req.headers['x-user-id'] || 'default';
+    const response = await askAIQuestionWithFocus(question, documentIds, conversationId, userId);
+    res.status(200).json(response);
   } catch (error) {
-    console.error('Error with AI query:', error);
+    logger.error('Error with focused AI query:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Start server
-if (process.argv[1] === new URL(import.meta.url).pathname) {
-  // Check if we already have stored credentials and load them
-  try {
-    if (fs.existsSync(TOKEN_PATH)) {
-      const token = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
-      oauth2Client.setCredentials(token);
-      console.log('Using saved credentials from token.json');
-    } else {
-      console.log('No stored credentials found. Authentication will be required.');
-    }
-  } catch (error) {
-    console.error('Error loading stored credentials:', error);
+// ---------------------------
+// Global Error and 404 Handlers
+// ---------------------------
+
+// Catch-all 404 for undefined routes
+app.use((req, res) => {
+  res.status(404).json({ error: 'Resource not found' });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  logger.error('Unhandled server error:', err);
+  res.status(500).json({ 
+    error: process.env.NODE_ENV === 'production' 
+      ? 'Internal server error' 
+      : err.message 
+  });
+});
+
+// ---------------------------
+// Load Stored Credentials (if available)
+// ---------------------------
+try {
+  if (fs.existsSync(TOKEN_PATH)) {
+    const storedToken = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8'));
+    oauth2Client.setCredentials(storedToken);
+    logger.info('Loaded stored credentials from token.json');
+  } else {
+    logger.warn('No stored credentials found. User authentication required.');
   }
-  
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+} catch (error) {
+  logger.error('Error loading stored credentials:', error);
 }
 
+// ---------------------------
+// Start the Server
+// ---------------------------
+app.listen(PORT, () => {
+  logger.info(`DriveOpenAI server is running on port ${PORT}`);
+}).on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    logger.error(`Port ${PORT} is already in use. Please free the port or use a different one.`);
+    process.exit(1);
+  } else {
+    logger.error('Server startup error:', err);
+  }
+});
+
+// Export the app for testing purposes
 export default app;

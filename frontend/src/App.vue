@@ -1,114 +1,68 @@
 <template>
-  <div id="app">
-    <header>
-      <nav>
-        <router-link to="/" class="nav-link">Home</router-link>
-        <router-link to="/ai" class="nav-link">AI Assistant</router-link>
-      </nav>
+  <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <header class="bg-white dark:bg-gray-800 shadow">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div class="flex justify-between items-center h-16">
+          <div class="flex items-center">
+            <h1 class="text-xl font-bold text-primary-600 dark:text-primary-400">DriveOpenAI</h1>
+            <nav class="flex space-x-6">
+              <router-link to="/" class="nav-link">Files</router-link>
+              <router-link to="/ai" class="nav-link">AI Assistant</router-link>
+              <router-link to="/chat" class="nav-link">Smart Chat</router-link>
+            </nav>
+          </div>
+          <div class="flex items-center">
+            <AuthStatus />
+            <DarkModeToggle class="ml-4" />
+          </div>
+        </div>
+      </div>
     </header>
     
-    <!-- Auth status component -->
-    <AuthStatus class="auth-status-container" />
-    
     <main>
-      <router-view />
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <router-view />
+      </div>
     </main>
+    
+    <footer class="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 mt-12">
+      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+        <p class="text-center text-gray-500 dark:text-gray-400 text-sm">
+          DriveOpenAI - Your Personal AI Assistant for Google Drive
+        </p>
+      </div>
+    </footer>
   </div>
 </template>
 
 <script>
 import AuthStatus from './components/AuthStatus.vue';
+import DarkModeToggle from './components/DarkModeToggle.vue';
 
 export default {
   name: 'App',
   components: {
-    AuthStatus
+    AuthStatus,
+    DarkModeToggle
   }
 };
 </script>
 
 <style>
+/* Base styles for dark mode support */
+.dark-mode {
+  --color-primary: #3b82f6;
+  --color-background: #111827;
+  --color-text: #f3f4f6;
+}
+
+/* Global styles */
 body {
-  margin: 0;
-  padding: 0;
-  font-family: Arial, sans-serif;
+  transition: background-color 0.3s ease;
 }
 
-#app {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 20px;
-}
-
-header {
-  margin-bottom: 20px;
-  border-bottom: 1px solid #eee;
-  padding-bottom: 10px;
-}
-
-nav {
-  display: flex;
-  gap: 20px;
-}
-
-.nav-link {
-  text-decoration: none;
-  color: #333;
-  font-weight: bold;
-}
-
-.nav-link.router-link-active {
-  color: #4285f4;
-}
-
-.auth-status-container {
-  margin-bottom: 20px;
-}
-
-main {
-  background-color: #f9f9f9;
-  padding: 20px;
-  border-radius: 8px;
-  min-height: 80vh;
-}
-
-.btn {
-  background-color: #4285f4;
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.btn:hover {
-  background-color: #3b78e7;
-}
-
-.btn-danger {
-  background-color: #ea4335;
-}
-
-.btn-danger:hover {
-  background-color: #d33426;
-}
-
-.input-group {
-  margin-bottom: 20px;
-}
-
-.input-group label {
-  display: block;
-  margin-bottom: 5px;
-  font-weight: bold;
-}
-
-.input-group input,
-.input-group select {
-  width: 100%;
-  padding: 8px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+body.dark-mode {
+  background-color: var(--color-background);
+  color: var(--color-text);
 }
 </style>

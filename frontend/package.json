@@ -6,15 +6,26 @@
     "serve": "vue-cli-service serve",
     "build": "vue-cli-service build",
     "lint": "vue-cli-service lint",
-    "test": "jest"
+    "test": "jest",
+    "tailwind:watch": "tailwindcss -i ./src/assets/tailwind.css -o ./src/assets/styles.css --watch",
+    "tailwind:build": "tailwindcss -i ./src/assets/tailwind.css -o ./src/assets/styles.css",
+    "dev": "concurrently \"npm run serve\" \"npm run tailwind:watch\""
   },
   "dependencies": {
+    "@headlessui/vue": "^1.7.23",
+    "@heroicons/vue": "^2.2.0",
     "axios": "^1.7.9",
+    "chart.js": "^4.4.8",
     "core-js": "^3.38.1",
     "firebase": "^11.4.0",
+    "lodash": "^4.17.21",
+    "date-fns": "^2.30.0",
+    "marked": "^4.3.0",
     "vue": "^3.5.13",
+    "vue-chartjs": "^5.3.2",
     "vue-router": "^4.5.0",
-    "vuex": "^4.0.2"
+    "vuex": "^4.0.2",
+    "vue3-markdown-it": "^1.0.10"
   },
   "devDependencies": {
     "@babel/core": "^7.25.9",
@@ -24,9 +35,14 @@
     "@vue/cli-service": "^5.0.8",
     "@vue/test-utils": "^2.4.0-alpha.2",
     "@vue/vue3-jest": "^29.2.6",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^8.2.2",
     "eslint": "^8.57.0",
     "eslint-plugin-vue": "^9.30.0",
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "postcss": "^8.5.3",
+    "postcss-import": "^15.1.0",
+    "tailwindcss": "^3.4.17"
   },
   "eslintConfig": {
     "root": true,

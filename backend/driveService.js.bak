@@ -5,10 +5,6 @@ import mammoth from 'mammoth';
 import logger from './logger.js';
 import { retryWithBackoff } from './utils.js';
 import { extractTextFromPDF } from './patches/pdf-parse-fix.js'; 
-import express from 'express';
-
-// Create router for Drive API routes
-const router = express.Router();
 
 // In-memory cache
 const fileContentCache = new Map();
@@ -118,7 +114,7 @@ export async function extractTextFromDocx(buffer) {
     return value;
   } catch (error) {
     logger.error('Error extracting text from DOCX:', error);
-    return '[Error extracting DOCX text]'; // More descriptive error message
+    return ''; // Return empty string on error
   }
 }
 
@@ -153,7 +149,6 @@ export async function getFileContent(fileId, mimeType) {
     // For Google Docs, Sheets, Slides, etc.
     if (mimeType.startsWith('application/vnd.google-apps')) {
       let exportMime;
-      let isExportable = true;
       
       // Choose appropriate export format based on Google Workspace file type
       if (mimeType === 'application/vnd.google-apps.document') {
@@ -162,84 +157,37 @@ export async function getFileContent(fileId, mimeType) {
         exportMime = 'text/csv';
       } else if (mimeType === 'application/vnd.google-apps.presentation') {
         exportMime = 'text/plain';
-      } else if (mimeType === 'application/vnd.google-apps.folder') {
-        // Folders don't have content to extract
-        isExportable = false;
-        content = "[Google Drive Folder]";
       } else {
-        // Other Google types, try plain text but be prepared for failures
+        // Default to plain text for other Google types
         exportMime = 'text/plain';
       }
       
-      if (isExportable) {
-        try {
-          // Export Google Workspace files
-          const response = await retryWithBackoff(() => 
-            drive.files.export({ fileId, mimeType: exportMime }, { responseType: 'arraybuffer' })
-          );
-          
-          content = Buffer.from(response.data).toString('utf-8');
-        } catch (error) {
-          // Handle non-exportable files
-          if (error.message && (
-              error.message.includes('Export only supports Docs Editors files') ||
-              error.message.includes('fileNotExportable')
-          )) {
-            logger.warn(`File ${fileId} (${mimeType}) is not exportable. Will try downloading directly.`);
-            // Try to download directly as a fallback
-            try {
-              const response = await retryWithBackoff(() => 
-                drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' })
-              );
-              content = Buffer.from(response.data).toString('utf-8');
-            } catch (downloadErr) {
-              logger.warn(`Failed to download file ${fileId} directly: ${downloadErr.message}`);
-              content = `[Content unavailable for ${mimeType}]`;
-            }
-          } else {
-            // For other errors, just log and continue with empty content
-            logger.error(`Error exporting Google file ${fileId}: ${error.message}`);
-            content = `[Error accessing file content]`;
-          }
-        }
-      }
+      // Export Google Workspace files
+      const response = await retryWithBackoff(() => 
+        drive.files.export({ fileId, mimeType: exportMime }, { responseType: 'arraybuffer' })
+      );
+      
+      content = Buffer.from(response.data).toString('utf-8');
     } else {
       // For regular files (PDFs, DOCXs, TXTs, etc.)
-      try {
-        const response = await retryWithBackoff(() => 
-          drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' })
-        );
-        
-        const fileBuffer = Buffer.from(response.data);
-        
-        // Process based on mime type
-        if (mimeType === 'application/pdf') {
-          content = await extractTextFromPDF(fileBuffer);
-        } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-          content = await extractTextFromDocx(fileBuffer);
-        } else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
-          // Plain text, JSON, etc.
-          content = fileBuffer.toString('utf-8');
-        } else if (mimeType.includes('image/')) {
-          // Image files - we can't extract text
-          content = `[Image file: ${mimeType}]`;
-        } else if (mimeType.includes('audio/') || mimeType.includes('video/')) {
-          // Audio/video files
-          content = `[Media file: ${mimeType}]`;
-        } else {
-          // Other unsupported file types
-          logger.warn(`Unsupported file type: ${mimeType} for file ${fileId}`);
-          content = `[Unsupported file type: ${mimeType}]`;
-        }
-      } catch (error) {
-        // Handle download errors gracefully
-        if (error.message && error.message.includes('Only files with binary content')) {
-          logger.warn(`File ${fileId} cannot be downloaded as binary: ${error.message}`);
-          content = `[File not downloadable as binary]`;
-        } else {
-          logger.error(`Error downloading file ${fileId}: ${error.message}`);
-          content = `[Error downloading file content]`;
-        }
+      const response = await retryWithBackoff(() => 
+        drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' })
+      );
+      
+      const fileBuffer = Buffer.from(response.data);
+      
+      // Process based on mime type
+      if (mimeType === 'application/pdf') {
+        content = await extractTextFromPDF(fileBuffer);
+      } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        content = await extractTextFromDocx(fileBuffer);
+      } else if (mimeType.startsWith('text/') || mimeType === 'application/json') {
+        // Plain text, JSON, etc.
+        content = fileBuffer.toString('utf-8');
+      } else {
+        // Unsupported file type
+        logger.warn(`Unsupported file type: ${mimeType} for file ${fileId}`);
+        content = `[Unsupported file type: ${mimeType}]`;
       }
     }
     
@@ -252,7 +200,7 @@ export async function getFileContent(fileId, mimeType) {
     return content;
   } catch (error) {
     logger.error(`Error getting content for file ${fileId}:`, error);
-    return `[Error processing file]`; // Don't throw, return an error message instead
+    throw error;
   }
 }
 
@@ -276,23 +224,11 @@ export async function listAndIndexFiles(options = { maxFiles: 100 }) {
       
       // Filter files that we can extract text from
       const files = response.files.filter(file => {
-        // Skip large binary files we know we can't process
-        if (file.mimeType.includes('image/') || 
-            file.mimeType.includes('audio/') || 
-            file.mimeType.includes('video/') ||
-            file.mimeType.includes('application/zip') ||
-            file.mimeType.includes('application/x-zip')) {
-          return false;
-        }
-        
         // Include text-based files and known processable types
         return file.mimeType.startsWith('text/') || 
-               file.mimeType.includes('pdf') || 
-               file.mimeType.includes('document') ||
-               file.mimeType.startsWith('application/vnd.google-apps') ||
-               file.mimeType.includes('json') ||
-               file.mimeType.includes('xml') ||
-               file.mimeType.includes('csv');
+               file.mimeType === 'application/pdf' || 
+               file.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+               file.mimeType.startsWith('application/vnd.google-apps');
       });
       
       indexableFiles.push(...files);
@@ -312,63 +248,3 @@ export async function listAndIndexFiles(options = { maxFiles: 100 }) {
     throw error;
   }
 }
-
-// Set up Drive API routes
-router.get('/', async (req, res) => {
-  try {
-    const { limit, offset, modifiedAfter, modifiedBefore, mimeType } = req.query;
-    const data = await listFiles({ 
-      limit: Number(limit) || 10, 
-      offset,
-      modifiedAfter,
-      modifiedBefore,
-      mimeType
-    });
-    res.status(200).json(data);
-  } catch (error) {
-    logger.error('Error listing files:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const file = await getFileById(id);
-    res.status(200).json(file);
-  } catch (error) {
-    logger.error('Error getting file:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.delete('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    await deleteFile(id);
-    res.status(204).send();
-  } catch (error) {
-    logger.error('Error deleting file:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.put('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, description } = req.body;
-    const metadata = {};
-    
-    if (name) metadata.name = name;
-    if (description) metadata.description = description;
-    
-    const updatedFile = await updateFile(id, metadata);
-    res.status(200).json(updatedFile);
-  } catch (error) {
-    logger.error('Error updating file:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Export the default router to be used in server.js
-export default router;
