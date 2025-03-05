@@ -1,8 +1,8 @@
 <template>
-  <div class="chat-view">
-    <h1 class="text-2xl font-bold mb-4">Smart Drive Assistant</h1>
+  <div class="chat-view container mx-auto px-4 py-8">
+    <h1 class="text-3xl font-bold text-center mb-6">Chat with DriveOpenAI</h1>
     <!-- Indexing progress component -->
-    <IndexingProgress v-if="!indexComplete" class="mb-5" @indexing-completed="onIndexingComplete" />
+    <IndexingProgress v-if="!indexComplete" class="mb-6" @indexing-completed="onIndexingComplete" />
     <!-- Chat interface component -->
     <ChatInterface 
       ref="chatInterface"
@@ -56,6 +56,5 @@ export default {
 .chat-view {
   max-width: 1200px;
   margin: 0 auto;
-  padding: 0 1rem;
 }
 </style>

@@ -6,9 +6,10 @@
           <div class="flex items-center">
             <h1 class="text-xl font-bold text-primary-600 dark:text-primary-400">DriveOpenAI</h1>
             <nav class="flex space-x-6">
-              <router-link to="/" class="nav-link">Files</router-link>
-              <router-link to="/ai" class="nav-link">AI Assistant</router-link>
+              <router-link to="/" class="nav-link">Home</router-link>
+              <router-link to="/files" class="nav-link">Files</router-link>
               <router-link to="/chat" class="nav-link">Smart Chat</router-link>
+              <router-link to="/login" class="nav-link">Login</router-link>
             </nav>
           </div>
           <div class="flex items-center">
