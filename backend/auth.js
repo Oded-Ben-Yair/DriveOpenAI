@@ -7,21 +7,51 @@ import { fileURLToPath } from 'url';
 import logger from './logger.js';
 import { retryWithBackoff } from './utils.js';
 
-dotenv.config();
+// Load environment variables from .env file or Firebase config
+let fbConfig = {};
+try {
+  // When running in Firebase Functions
+  const functions = require('firebase-functions');
+  fbConfig = functions.config();
+  logger.info('Auth: Loaded environment from Firebase config');
+} catch (e) {
+  // When running locally, use .env
+  dotenv.config();
+  logger.info('Auth: Loaded environment from .env file');
+}
+
+// Helper function to get environment variables with fallbacks
+const getEnvVar = (name, defaultValue = '') => {
+  if (process.env[name]) {
+    return process.env[name];
+  }
+  
+  // Handle nested Firebase config structure
+  const parts = name.toLowerCase().split('_');
+  if (parts.length > 1 && fbConfig[parts[0]] && fbConfig[parts[0]][parts[1]]) {
+    return fbConfig[parts[0]][parts[1]];
+  }
+  
+  return defaultValue;
+};
 
 // Get directory name in ESM
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const TOKEN_PATH = path.join(__dirname, 'data', 'token.json');
 
-// Ensure data directory exists
-if (!fs.existsSync(path.join(__dirname, 'data'))) {
-  fs.mkdirSync(path.join(__dirname, 'data'), { recursive: true });
+// Set token storage path appropriate for the environment
+// In Firebase Functions, use /tmp as a writable directory
+const TOKEN_DIR = process.env.FIREBASE_CONFIG ? '/tmp' : path.join(__dirname, 'data');
+const TOKEN_PATH = path.join(TOKEN_DIR, 'token.json');
+
+// Ensure directory exists
+if (!fs.existsSync(TOKEN_DIR)) {
+  fs.mkdirSync(TOKEN_DIR, { recursive: true });
 }
 
 const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
+  getEnvVar('GOOGLE_CLIENT_ID'),
+  getEnvVar('GOOGLE_CLIENT_SECRET'),
+  getEnvVar('GOOGLE_REDIRECT_URI')
 );
 
 // Check if we have stored credentials and use them
@@ -105,14 +135,15 @@ async function handleOAuthCallback(req, res, next) {
     const tokens = await getToken(code);
     
     // Determine where to redirect after successful authentication
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
+    // Use Firebase hosting URL if available
+    const frontendUrl = getEnvVar('FRONTEND_URL', 'http://localhost:8080');
     const tokenParam = encodeURIComponent(JSON.stringify(tokens));
     
     // Redirect to frontend with tokens
     res.redirect(`${frontendUrl}?auth=success&token=${tokenParam}`);
   } catch (error) {
     logger.error('OAuth callback error:', error);
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
+    const frontendUrl = getEnvVar('FRONTEND_URL', 'http://localhost:8080');
     res.redirect(`${frontendUrl}?auth=error&message=${encodeURIComponent(error.message)}`);
   }
 }

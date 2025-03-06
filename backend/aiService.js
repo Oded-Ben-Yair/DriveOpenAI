@@ -1,10 +1,4 @@
-// backend/aiService.js
-// This file contains AI helper functions for DriveOpenAI.
-// It implements functions for obtaining embeddings with caching and normalization,
-// performing semantic search over an in‑memory vector index, building the index from Drive files,
-// and generating AI answers (using Retrieval‑Augmented Generation).
-// Now with conversation memory and focused document search.
-
+// backend/aiService.js - Enhanced with streaming support and caching
 import dotenv from 'dotenv';
 import OpenAI from 'openai';
 import express from 'express';
@@ -12,6 +6,7 @@ import { check, validationResult } from 'express-validator';
 import { listAndIndexFiles, getFileContent } from './driveService.js';
 import logger from './logger.js';
 import { chunkText, cosineSimilarity, retryWithBackoff } from './utils.js';
+import mcache from 'memory-cache';
 
 // Create router for AI routes
 const router = express.Router();
@@ -20,11 +15,15 @@ dotenv.config();
 
 // Initialize OpenAI client using the API key from environment variables.
 const apiKey = process.env.OPENAI_API_KEY;
-const openai = new OpenAI({ apiKey });
+const openai = new OpenAI({ 
+  apiKey,
+  maxRetries: 3,
+  timeout: 30000 // 30 second timeout
+});
 
 // Retrieve model names from environment variables.
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-ada-002';
-const COMPLETION_MODEL = process.env.COMPLETION_MODEL || 'gpt-3.5-turbo'; // Fallback if not provided
+const COMPLETION_MODEL = process.env.COMPLETION_MODEL || 'gpt-3.5-turbo'; // Use faster model by default
 
 logger.info(`Using embedding model: ${EMBEDDING_MODEL}`);
 logger.info(`Using completion model: ${COMPLETION_MODEL}`);
@@ -45,6 +44,10 @@ const EMBEDDING_CACHE = new Map();
 
 // In-memory store for conversations.
 const conversations = new Map();
+
+// Cache for AI responses
+const RESPONSE_CACHE = new Map();
+const RESPONSE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
  * Create a new conversation.
@@ -281,6 +284,17 @@ export async function buildVectorIndex(force = false) {
 export async function answerQuery(question, conversationHistory = [], documentIds = []) {
   try {
     logger.info(`Answering query: "${question}"`);
+    
+    // Check response cache (only for simple queries without conversation history)
+    if (conversationHistory.length === 0 && documentIds.length === 0) {
+      const cacheKey = `query_${question.toLowerCase().trim()}`;
+      const cachedResponse = mcache.get(cacheKey);
+      if (cachedResponse) {
+        logger.debug('Using cached AI response');
+        return cachedResponse;
+      }
+    }
+    
     if (vectorIndex.length === 0) {
       logger.info('Vector index is empty; rebuilding index...');
       const indexSize = await buildVectorIndex();
@@ -323,7 +337,8 @@ export async function answerQuery(question, conversationHistory = [], documentId
         content: `You are an AI assistant specialized in answering questions about the user's Google Drive documents.
 Use only the following excerpts from the documents to answer the query.
 If the answer is not found in the provided excerpts, state that clearly.
-Always cite the document names when using their content.`
+Always cite the document names when using their content.
+Be concise but thorough.`
       }
     ];
     const recentHistory = conversationHistory.slice(-5);
@@ -349,7 +364,16 @@ Answer:`
       max_tokens: 500
     }));
     const answer = completion.choices[0].message.content.trim();
-    return { answer, sources };
+    
+    const result = { answer, sources };
+    
+    // Cache the response if it's a simple query
+    if (conversationHistory.length === 0 && documentIds.length === 0) {
+      const cacheKey = `query_${question.toLowerCase().trim()}`;
+      mcache.put(cacheKey, result, RESPONSE_CACHE_TTL_MS);
+    }
+    
+    return result;
   } catch (error) {
     logger.error(`Error in answerQuery: ${error.message}`);
     return {
@@ -398,6 +422,112 @@ export async function askQuestion(question) {
   } catch (error) {
     logger.error(`Error in askQuestion: ${error.message}`, error);
     return "I encountered an error while processing your question. Please try again.";
+  }
+}
+
+/**
+ * Stream an AI response to the client.
+ * @param {string} question - The question to answer
+ * @param {object} res - Express response object
+ */
+export async function askQuestionStream(question, res) {
+  try {
+    // Set SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    
+    // Get files for context
+    let contextText = "";
+    let sources = [];
+    
+    if (vectorIndex.length === 0) {
+      await buildVectorIndex();
+    }
+    
+    // Stream immediate feedback
+    res.write(`data: ${JSON.stringify({ content: "Searching your documents..." })}\n\n`);
+    
+    // Get relevant documents
+    const relevantChunks = await semanticSearch(question, MAX_CONTEXT_CHUNKS);
+    
+    if (relevantChunks.length === 0) {
+      res.write(`data: ${JSON.stringify({ content: "I couldn't find any relevant information in your files. " })}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    
+    // Build context and collect sources
+    for (const item of relevantChunks) {
+      if (!isErrorContent(item.chunk)) {
+        contextText += `From "${item.fileName}":\n${item.chunk}\n\n---\n\n`;
+        if (!sources.some(source => source.fileId === item.fileId)) {
+          sources.push({
+            fileId: item.fileId,
+            fileName: item.fileName
+          });
+        }
+      }
+    }
+    
+    // Stream a progress update
+    res.write(`data: ${JSON.stringify({ content: "Found relevant documents. Generating response..." })}\n\n`);
+    
+    // Set up messages for the streaming completion
+    const messages = [
+      { 
+        role: "system", 
+        content: `You are an AI assistant specialized in answering questions about the user's Google Drive documents.
+Use only the following excerpts from the documents to answer the query.
+If the answer is not found in the provided excerpts, state that clearly.
+Always cite the document names when using their content.
+Be concise but thorough.`
+      },
+      { 
+        role: "user", 
+        content: `Document Excerpts:
+${contextText}
+
+My question is: "${question}"
+
+Answer:` 
+      }
+    ];
+    
+    // Clear the previous progress updates
+    res.write(`data: ${JSON.stringify({ content: "" })}\n\n`);
+    
+    // Stream the LLM response
+    const response = await openai.chat.completions.create({
+      model: COMPLETION_MODEL,
+      messages: messages,
+      temperature: 0.3,
+      max_tokens: 500,
+      stream: true,
+    });
+    
+    for await (const chunk of response) {
+      const content = chunk.choices[0]?.delta?.content || '';
+      if (content) {
+        res.write(`data: ${JSON.stringify({ content })}\n\n`);
+      }
+    }
+    
+    // Add sources information
+    if (sources.length > 0) {
+      const sourcesText = "\n\nSources:\n" + sources.map(src => `- ${src.fileName}`).join("\n");
+      res.write(`data: ${JSON.stringify({ content: sourcesText })}\n\n`);
+    }
+    
+    res.write('data: [DONE]\n\n');
+    res.end();
+  } catch (error) {
+    logger.error('Error in streaming answer:', error);
+    res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
   }
 }
 
@@ -482,6 +612,27 @@ router.post('/', [
   }
 });
 
+// New streaming endpoint
+router.post('/stream', [
+  check('question').notEmpty().withMessage('Question is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  
+  try {
+    const { question } = req.body;
+    await askQuestionStream(question, res);
+    // Response is handled inside the streaming function
+  } catch (error) {
+    logger.error('Error with streaming AI query:', error);
+    // For streaming errors, we need to use the SSE format
+    res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
+  }
+});
+
 router.post('/index-build', async (req, res) => {
   try {
     const { force } = req.body;
@@ -538,4 +689,3 @@ router.post('/focused', [
 });
 
 export default router;
-

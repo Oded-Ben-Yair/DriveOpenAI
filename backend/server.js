@@ -1,20 +1,19 @@
 // backend/server.js
-// This is the main entry point for DriveOpenAI's backend.
-// It sets up Express with security, logging, rate limiting, authentication,
-// and routes for Google Drive, Gmail, and AI endpoints.
-// It also loads any stored credentials and starts the server.
+// Main entry point for DriveOpenAI's backend with performance optimizations.
 
 import express from 'express';
-import helmet from 'helmet';                   // Security middleware: sets HTTP headers
-import morgan from 'morgan';                   // HTTP request logging
-import cors from 'cors';                       // Cross-origin resource sharing
-import rateLimit from 'express-rate-limit';    // Rate limiting middleware
+import helmet from 'helmet';
+import morgan from 'morgan';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+import compression from 'compression';          // Added for response compression
 import { check, validationResult } from 'express-validator';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import logger from './logger.js';              // Custom logger using Winston
+import logger from './logger.js';
+import mcache from 'memory-cache';              // Added for memory caching
 
 // Import authentication and route modules
 import { oauth2Client, getAuthUrl, handleOAuthCallback, authenticate, refreshAccessToken } from './auth.js';
@@ -24,15 +23,35 @@ import aiRoutes, {
   buildVectorIndex, 
   getIndexingProgress,
   askAIQuestion, 
-  askAIQuestionWithFocus 
+  askAIQuestionWithFocus,
+  askQuestionStream            // New streaming function
 } from './aiService.js';
 
-// Load environment variables from .env file
-dotenv.config();
+// Load environment variables from .env file or Firebase config
+let fbConfig = {};
+try {
+  // When running in Firebase Functions
+  const functions = require('firebase-functions');
+  fbConfig = functions.config();
+  logger.info('Loaded environment from Firebase config');
+} catch (e) {
+  // When running locally, use .env
+  dotenv.config();
+  logger.info('Loaded environment from .env file');
+}
+
+// Access environment variables with fallbacks
+const getEnvVar = (name, defaultValue = '') => {
+  return process.env[name] || 
+    (fbConfig && fbConfig[name.toLowerCase().split('_')[0]] && 
+     fbConfig[name.toLowerCase().split('_')[0]][name.toLowerCase().split('_')[1]]) || 
+    defaultValue;
+};
 
 // Create Express app and set port
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.set('trust proxy', true);
+const PORT = process.env.PORT || fbConfig.app?.port || 3000;
 
 // Determine __dirname in ES modules
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +66,9 @@ if (!fs.existsSync(path.join(__dirname, 'data'))) {
 // Middleware Setup
 // ---------------------------
 
+// Add compression for faster response times
+app.use(compression());
+
 // Use Helmet to secure HTTP headers
 app.use(helmet());
 
@@ -56,9 +78,14 @@ app.use(express.json({ limit: '1mb' }));
 // Use Morgan to log HTTP requests in combined format
 app.use(morgan('combined'));
 
-// Configure CORS – allow requests only from approved origins (e.g., your frontend)
+// Configure CORS – allow requests from multiple origins
+// Fixed CORS to include Firebase domain
+const corsOrigins = process.env.CORS_ORIGIN ? 
+  process.env.CORS_ORIGIN.split(',') : 
+  ['http://localhost:8080', 'https://driveopenai.web.app'];
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:8080',
+  origin: corsOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
@@ -73,13 +100,36 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
+// Simple cache middleware
+const cache = (duration) => {
+  return (req, res, next) => {
+    // Only cache GET requests
+    if (req.method !== 'GET') return next();
+    
+    const key = '__express__' + req.originalUrl || req.url;
+    const cachedBody = mcache.get(key);
+    
+    if (cachedBody) {
+      res.send(cachedBody);
+      return;
+    } else {
+      res.sendResponse = res.send;
+      res.send = (body) => {
+        mcache.put(key, body, duration * 1000);
+        res.sendResponse(body);
+      };
+      next();
+    }
+  };
+};
+
 // Performance monitoring middleware to log request duration
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
     logger.debug(`${req.method} ${req.originalUrl} completed in ${duration}ms with status ${res.statusCode}`);
-    const MAX_RESPONSE_TIME = Number(process.env.MAX_RESPONSE_TIME_MS) || 1000;
+    const MAX_RESPONSE_TIME = Number(getEnvVar('MAX_RESPONSE_TIME_MS', 1000));
     if (duration > MAX_RESPONSE_TIME) {
       logger.warn(`Slow request: ${req.method} ${req.originalUrl} took ${duration}ms`);
     }
@@ -87,7 +137,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Token Refresh Middleware - should come before route handlers
+// Token Refresh Middleware
 app.use(async (req, res, next) => {
   try {
     if (oauth2Client.credentials?.expiry_date) {
@@ -104,11 +154,7 @@ app.use(async (req, res, next) => {
   next();
 });
 
-// ---------------------------
 // Authentication Middleware
-// ---------------------------
-// Use the standard "Authorization: Bearer <token>" header.
-// The "authenticate" middleware verifies the JWT and attaches user credentials.
 app.use(authenticate);
 
 // ---------------------------
@@ -120,29 +166,29 @@ app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
 // Authentication routes
 app.get('/auth/google', (req, res) => {
-  // Redirect the user to Google's OAuth 2.0 consent page
   const authUrl = getAuthUrl();
   res.redirect(authUrl);
 });
 
 app.get('/auth/google/callback', async (req, res, next) => {
-  // Handle Google OAuth callback: exchange code for tokens and issue a JWT
   try {
     await handleOAuthCallback(req, res, next);
-    // The callback handler sends the JWT or sets a secure cookie.
   } catch (error) {
     logger.error('Error during Google OAuth callback:', error);
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:8080'}?auth=error&message=${encodeURIComponent(error.message)}`);
+    // Use Firebase hosting URL if available
+    const frontendUrl = getEnvVar('FRONTEND_URL', 'http://localhost:8080');
+    res.redirect(`${frontendUrl}?auth=error&message=${encodeURIComponent(error.message)}`);
   }
 });
 
-// Token update endpoint: allows client to set new token and save it to disk (for persistence)
+// Token update endpoint
 app.post('/auth/token', express.json(), async (req, res) => {
   const { token } = req.body;
   if (!token) {
@@ -158,8 +204,8 @@ app.post('/auth/token', express.json(), async (req, res) => {
   }
 });
 
-// Auth status endpoint: returns whether the server has valid credentials
-app.get('/auth/status', (req, res) => {
+// Auth status endpoint - with caching
+app.get('/auth/status', cache(30), (req, res) => {
   try {
     if (oauth2Client.credentials && oauth2Client.credentials.access_token) {
       res.json({
@@ -181,18 +227,39 @@ app.get('/auth/status', (req, res) => {
 // Google API Routes
 // ---------------------------
 
-// Drive endpoints
-app.use('/api/files', driveRoutes); // Endpoints for file operations
+// Drive endpoints - Apply caching to file list
+app.use('/api/files', driveRoutes);
 
 // Gmail endpoints
-app.use('/api/emails', gmailRoutes); // Endpoints for email operations
+app.use('/api/emails', gmailRoutes);
 
 // AI endpoints
-app.use('/api/ai-query', aiRoutes);  // Endpoints for AI (RAG functionality)
+app.use('/api/ai-query', aiRoutes);
 
 // ---------------------------
-// NEW RAG and Conversation Endpoints
+// NEW RAG, Streaming and Conversation Endpoints
 // ---------------------------
+
+// New streaming AI endpoint
+app.post('/api/ai-query/stream', [
+  check('question').notEmpty().withMessage('Question is required')
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  
+  try {
+    const { question } = req.body;
+    await askQuestionStream(question, res);
+    // Response is handled inside the streaming function
+  } catch (error) {
+    logger.error('Error with streaming AI query:', error);
+    // For streaming errors, we need to send in the correct format
+    res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+    res.end();
+  }
+});
 
 // Index building endpoint
 app.post('/api/index-build', async (req, res) => {
@@ -226,7 +293,7 @@ app.post('/api/ai-conversation', [
   }
   try {
     const { question, conversationId } = req.body;
-    const userId = req.headers['x-user-id'] || 'default'; // Retrieve user ID from auth in production
+    const userId = req.headers['x-user-id'] || 'default';
     const response = await askAIQuestion(question, conversationId, userId);
     res.status(200).json(response);
   } catch (error) {
@@ -270,7 +337,8 @@ app.use((err, req, res, next) => {
   res.status(500).json({ 
     error: process.env.NODE_ENV === 'production' 
       ? 'Internal server error' 
-      : err.message 
+      : err.message,
+    ...(process.env.NODE_ENV !== 'production' && { stack: err.stack })
   });
 });
 
@@ -290,18 +358,21 @@ try {
 }
 
 // ---------------------------
-// Start the Server
+// Start the Server (only when not in Firebase Functions)
 // ---------------------------
-app.listen(PORT, () => {
-  logger.info(`DriveOpenAI server is running on port ${PORT}`);
-}).on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    logger.error(`Port ${PORT} is already in use. Please free the port or use a different one.`);
-    process.exit(1);
-  } else {
-    logger.error('Server startup error:', err);
-  }
-});
+// Check if this file is being run directly (not as a module)
+if (process.env.NODE_ENV !== 'production' && !process.env.FIREBASE_CONFIG) {
+  app.listen(PORT, () => {
+    logger.info(`DriveOpenAI server is running on port ${PORT}`);
+  }).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.error(`Port ${PORT} is already in use. Please free the port or use a different one.`);
+      process.exit(1);
+    } else {
+      logger.error('Server startup error:', err);
+    }
+  });
+}
 
-// Export the app for testing purposes
+// Export the app for Firebase Functions and testing purposes
 export default app;

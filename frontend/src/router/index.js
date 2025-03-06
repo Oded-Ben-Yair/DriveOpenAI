@@ -1,24 +1,39 @@
 import { createRouter, createWebHistory } from 'vue-router';
 
 // Import views
-import WelcomePage from '../views/WelcomePage.vue';  // New welcome/landing page
 import FileListView from '../views/FileListView.vue';
 import FileDetailView from '../views/FileDetailView.vue';
-// Removed AiQueryView since its functionality is now integrated into ChatView
+import AiQueryView from '../views/AiQueryView.vue';
 import LoginView from '../views/LoginView.vue';
-import ChatView from '../views/ChatView.vue'; // Unified Smart Chat interface
+import ChatView from '../views/ChatView.vue';
 
 const routes = [
-  { path: '/', name: 'Welcome', component: WelcomePage },  // Default landing page
-  { path: '/files', name: 'Files', component: FileListView },
-  { path: '/file/:id', name: 'FileDetail', component: FileDetailView, props: true },
-  { 
-    path: '/chat', 
-    name: 'Chat', 
-    component: ChatView,
-    meta: { title: 'Smart Drive Assistant' }
+  {
+    path: '/',
+    name: 'Home',
+    component: FileListView
   },
-  { path: '/login', name: 'Login', component: LoginView }
+  {
+    path: '/file/:id',
+    name: 'FileDetail',
+    component: FileDetailView,
+    props: true
+  },
+  {
+    path: '/ai',
+    name: 'AiQuery',
+    component: AiQueryView
+  },
+  {
+    path: '/chat',
+    name: 'Chat',
+    component: ChatView
+  },
+  {
+    path: '/login',
+    name: 'Login',
+    component: LoginView
+  }
 ];
 
 const router = createRouter({

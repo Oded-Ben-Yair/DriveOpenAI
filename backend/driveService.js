@@ -1,11 +1,13 @@
-// backend/driveService.js
+// backend/driveService.js - Fully Merged and Optimized Version
+
 import { google } from 'googleapis';
 import { oauth2Client, refreshAccessToken } from './auth.js';
 import mammoth from 'mammoth';
 import logger from './logger.js';
 import { retryWithBackoff } from './utils.js';
-import { extractTextFromPDF } from './patches/pdf-parse-fix.js'; 
+import { extractTextFromPDF } from './patches/pdf-parse-fix.js';
 import express from 'express';
+import mcache from 'memory-cache';
 
 // Create router for Drive API routes
 const router = express.Router();
@@ -17,61 +19,109 @@ const FILE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 // Initialize drive API
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-// List files with filtering options
+/**
+ * List files with filtering options and proper pagination
+ * @param {Object} options - Filter options
+ * @param {Number} options.limit - Maximum number of files to return
+ * @param {String} options.pageToken - Token for pagination
+ * @param {String} options.modifiedAfter - ISO date string for filtering files modified after this date
+ * @param {String} options.modifiedBefore - ISO date string for filtering files modified before this date
+ * @param {String} options.mimeType - Filter by specific mime type
+ * @returns {Promise<Object>} - Files data with nextPageToken
+ */
 export async function listFiles({ 
   limit = 10, 
-  offset = 0,
+  pageToken = null,
   modifiedAfter = null,
   modifiedBefore = null,
   mimeType = null
 } = {}) {
+  // Build query components
+  const queryParts = ['trashed=false'];
+  
+  if (modifiedAfter) {
+    try {
+      // Ensure proper date format
+      const afterDate = new Date(modifiedAfter);
+      if (!isNaN(afterDate.getTime())) {
+        queryParts.push(`modifiedTime > '${afterDate.toISOString()}'`);
+      } else {
+        logger.warn(`Invalid modifiedAfter date: ${modifiedAfter}`);
+      }
+    } catch (err) {
+      logger.error(`Error parsing modifiedAfter date: ${err.message}`);
+    }
+  }
+  
+  if (modifiedBefore) {
+    try {
+      const beforeDate = new Date(modifiedBefore);
+      if (!isNaN(beforeDate.getTime())) {
+        queryParts.push(`modifiedTime < '${beforeDate.toISOString()}'`);
+      } else {
+        logger.warn(`Invalid modifiedBefore date: ${modifiedBefore}`);
+      }
+    } catch (err) {
+      logger.error(`Error parsing modifiedBefore date: ${err.message}`);
+    }
+  }
+  
+  if (mimeType) {
+    queryParts.push(`mimeType='${mimeType}'`);
+  }
+  
+  // Prepare request parameters
+  const params = {
+    pageSize: Number(limit),
+    q: queryParts.join(' and '),
+    fields: 'nextPageToken, files(id, name, mimeType, owners, modifiedTime, size, webViewLink, md5Checksum)',
+    orderBy: 'modifiedTime desc' // Get most recent files first
+  };
+  
+  // Add pageToken for pagination if provided
+  if (pageToken) {
+    params.pageToken = pageToken;
+  }
+  
+  logger.debug(`Drive query: ${params.q}`);
+  
   try {
-    // Build query for filtering
-    let query = 'trashed=false';
-    
-    if (modifiedAfter) {
-      query += ` and modifiedTime > "${modifiedAfter}"`;
-    }
-    
-    if (modifiedBefore) {
-      query += ` and modifiedTime < "${modifiedBefore}"`;
-    }
-    
-    if (mimeType) {
-      query += ` and mimeType = "${mimeType}"`;
-    }
-    
-    const response = await retryWithBackoff(() => drive.files.list({
-      pageSize: Number(limit),
-      pageToken: offset || undefined,
-      q: query,
-      fields: 'nextPageToken, files(id, name, mimeType, owners, modifiedTime, size, webViewLink, md5Checksum)'
-    }));
-    
+    const response = await retryWithBackoff(() => drive.files.list(params));
     return response.data;
   } catch (error) {
     // If token is expired, try to refresh
-    if (error.code === 401) {
-      const refreshed = await refreshAccessToken();
-      if (refreshed) {
-        // Retry the request with new token
-        return listFiles({ limit, offset, modifiedAfter, modifiedBefore, mimeType });
-      }
+    if (error.code === 401 && await refreshAccessToken()) {
+      // Retry the request with new token
+      return listFiles({ limit, pageToken, modifiedAfter, modifiedBefore, mimeType });
     }
     
     logger.error('Error listing files:', error);
-    throw error;
+    throw new Error(`Failed to list files: ${error.message}`);
   }
 }
 
-// Get file by ID with more details
+/**
+ * Get file by ID with detailed information
+ * @param {String} fileId - Google Drive file ID
+ * @returns {Promise<Object>} - File details
+ */
 export async function getFileById(fileId) {
+  // Check cache first
+  const cacheKey = `file_${fileId}`;
+  const cachedFile = mcache.get(cacheKey);
+  if (cachedFile) {
+    logger.debug(`Cache hit for file details ${fileId}`);
+    return cachedFile;
+  }
+
   try {
     const response = await retryWithBackoff(() => drive.files.get({
       fileId,
       fields: 'id, name, mimeType, owners, modifiedTime, size, webViewLink, description, md5Checksum'
     }));
     
+    // Cache the file data for 5 minutes
+    mcache.put(cacheKey, response.data, 5 * 60 * 1000);
     return response.data;
   } catch (error) {
     logger.error(`Error getting file ${fileId}:`, error);
@@ -79,19 +129,29 @@ export async function getFileById(fileId) {
   }
 }
 
-// Delete file by ID
+/**
+ * Delete file by ID
+ * @param {String} fileId - Google Drive file ID
+ * @returns {Promise<void>}
+ */
 export async function deleteFile(fileId) {
   try {
     await retryWithBackoff(() => drive.files.delete({ fileId }));
     // Also remove from cache if present
     fileContentCache.delete(fileId);
+    mcache.del(`file_${fileId}`);
   } catch (error) {
     logger.error(`Error deleting file ${fileId}:`, error);
     throw error;
   }
 }
 
-// Update file metadata
+/**
+ * Update file metadata
+ * @param {String} fileId - Google Drive file ID
+ * @param {Object} metadata - New metadata to apply
+ * @returns {Promise<Object>} - Updated file
+ */
 export async function updateFile(fileId, metadata) {
   try {
     const response = await retryWithBackoff(() => drive.files.update({
@@ -100,6 +160,8 @@ export async function updateFile(fileId, metadata) {
       fields: 'id, name, mimeType, owners, modifiedTime, size, webViewLink, description'
     }));
     
+    // Update cache
+    mcache.del(`file_${fileId}`);
     return response.data;
   } catch (error) {
     logger.error(`Error updating file ${fileId}:`, error);
@@ -271,7 +333,7 @@ export async function listAndIndexFiles(options = { maxFiles: 100 }) {
     do {
       const response = await listFiles({ 
         limit: 50,
-        offset: pageToken
+        pageToken: pageToken
       });
       
       // Filter files that we can extract text from
@@ -316,10 +378,10 @@ export async function listAndIndexFiles(options = { maxFiles: 100 }) {
 // Set up Drive API routes
 router.get('/', async (req, res) => {
   try {
-    const { limit, offset, modifiedAfter, modifiedBefore, mimeType } = req.query;
+    const { limit, pageToken, modifiedAfter, modifiedBefore, mimeType } = req.query;
     const data = await listFiles({ 
       limit: Number(limit) || 10, 
-      offset,
+      pageToken: pageToken || null,
       modifiedAfter,
       modifiedBefore,
       mimeType
@@ -370,5 +432,8 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Export the default router to be used in server.js
+// Make the list function available directly on drive.files
+drive.files.listFiles = listFiles;
+
+// Export the router to be used in server.js
 export default router;
