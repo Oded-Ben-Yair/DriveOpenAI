@@ -22,8 +22,12 @@ dotenv.config();
 const apiKey = process.env.OPENAI_API_KEY;
 const openai = new OpenAI({ apiKey });
 
-// Embedding model name is configurable via environment variables.
+// Retrieve model names from environment variables.
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-ada-002';
+const COMPLETION_MODEL = process.env.COMPLETION_MODEL || 'gpt-3.5-turbo'; // Fallback if not provided
+
+logger.info(`Using embedding model: ${EMBEDDING_MODEL}`);
+logger.info(`Using completion model: ${COMPLETION_MODEL}`);
 
 // Maximum number of document chunks to include in the context for answering a query.
 const MAX_CONTEXT_CHUNKS = 4;
@@ -339,7 +343,7 @@ My question is: "${question}"
 Answer:` 
     });
     const completion = await retryWithBackoff(() => openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: COMPLETION_MODEL,
       messages: messages,
       temperature: 0.3,
       max_tokens: 500
@@ -534,3 +538,4 @@ router.post('/focused', [
 });
 
 export default router;
+
