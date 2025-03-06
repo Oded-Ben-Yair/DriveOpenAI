@@ -3,7 +3,7 @@
     <div class="sm:mx-auto sm:w-full sm:max-w-md">
       <h2 class="mt-6 text-center text-3xl font-extrabold text-gray-900">DriveOpenAI</h2>
       <p class="mt-2 text-center text-sm text-gray-600">
-        Connect your Google Drive to get started
+        Connect your Google Drive to get started.
       </p>
     </div>
 
@@ -32,9 +32,7 @@
                 <div class="w-full border-t border-gray-300"></div>
               </div>
               <div class="relative flex justify-center text-sm">
-                <span class="px-2 bg-white text-gray-500">
-                  Connect with
-                </span>
+                <span class="px-2 bg-white text-gray-500">Connect with</span>
               </div>
             </div>
 
@@ -53,7 +51,7 @@
 
           <div class="mt-6">
             <p class="text-center text-xs text-gray-600">
-              By connecting, you'll allow DriveOpenAI to access your Google Drive files to provide AI-powered answers.
+              By connecting, you'll allow DriveOpenAI to access your Google Drive files for AI-powered answers.
             </p>
           </div>
         </div>
@@ -72,16 +70,14 @@ export default {
     };
   },
   mounted() {
-    // Check if there's an error in the URL
     const params = new URLSearchParams(window.location.search);
     if (params.get('auth') === 'error') {
       this.error = params.get('message') || 'Authentication failed. Please try again.';
     }
-    
-    // Check if the authentication was successful
     if (params.get('auth') === 'success') {
       this.$router.push('/');
     }
   }
 };
 </script>
+

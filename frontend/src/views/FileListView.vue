@@ -4,7 +4,7 @@
       <div class="sm:flex-auto">
         <h1 class="text-xl font-semibold text-gray-900">Google Drive Files</h1>
         <p class="mt-2 text-sm text-gray-700">
-          Browse and manage your Google Drive files. These files are searchable by the AI assistant.
+          Browse and manage your Google Drive files. Connect your account to search and view details.
         </p>
       </div>
       <div class="mt-4 sm:mt-0 sm:ml-16 sm:flex-none">
@@ -24,7 +24,7 @@
         <div class="mt-4 grid grid-cols-1 gap-y-4 sm:grid-cols-3 sm:gap-x-6">
           <div>
             <label for="limit" class="block text-sm font-medium text-gray-700">Files per page</label>
-            <select id="limit" v-model="limit" @change="loadFiles" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+            <select id="limit" v-model="limit" @change="loadFiles" class="mt-1 block w-full pl-3 pr-10 py-2 border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
               <option value="10">10</option>
               <option value="25">25</option>
               <option value="50">50</option>
@@ -83,7 +83,7 @@
         <div class="ml-3">
           <h3 class="text-sm font-medium text-red-800">Error</h3>
           <div class="mt-2 text-sm text-red-700">
-            <p>{{ error }}</p>
+            <p>{{ errorMessage }}</p>
           </div>
           <div class="mt-4">
             <button @click="loadFiles" class="btn-secondary text-sm">Try Again</button>
@@ -99,7 +99,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m-9 1V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path>
         </svg>
         <h3 class="mt-2 text-sm font-medium text-gray-900">No files found</h3>
-        <p class="mt-1 text-sm text-gray-500">Try adjusting your filters or connect another Google Drive account.</p>
+        <p class="mt-1 text-sm text-gray-500">Either no files exist or you need to log in.</p>
       </div>
     </div>
     
@@ -241,14 +241,9 @@ export default {
       this.error = null;
       
       try {
-        // Format dates for API
-        const formattedAfter = this.modifiedAfter ? 
-          new Date(this.modifiedAfter).toISOString() : 
-          null;
-          
-        const formattedBefore = this.modifiedBefore ? 
-          new Date(this.modifiedBefore).toISOString() : 
-          null;
+        // Format dates as ISO strings
+        const formattedAfter = this.modifiedAfter ? new Date(this.modifiedAfter).toISOString() : null;
+        const formattedBefore = this.modifiedBefore ? new Date(this.modifiedBefore).toISOString() : null;
         
         const response = await axios.get(`${this.apiBaseUrl}/api/files`, {
           params: { 
@@ -263,7 +258,11 @@ export default {
         this.nextPageToken = response.data.nextPageToken;
       } catch (error) {
         console.error('Error loading files:', error);
-        this.error = error.response?.data?.error || 'Failed to load files';
+        if (error.response && error.response.status === 401) {
+          this.error = "Please log in with your Google account to view your files.";
+        } else {
+          this.error = error.response?.data?.error || 'Failed to load files';
+        }
       } finally {
         this.loading = false;
       }
@@ -313,3 +312,4 @@ export default {
   }
 }
 </script>
+
